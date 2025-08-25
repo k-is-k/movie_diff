@@ -1,0 +1,8 @@
+numpy
+opencv-python-headless
+pandas
+pydantic
+tqdm
+ffmpeg-python
+loguru
+Pillow
