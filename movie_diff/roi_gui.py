@@ -46,6 +46,18 @@ class ROIToolApp:
         self.scale = 1.0
         self.offset = (0, 0)
         self.rois: List[ROI] = []
+        self.analysis_df = None  # pandas DataFrame with analysis result
+        self.graph_axis = None  # (gx0, gy0, gw, gh, x_min, x_max)
+        self.series_colors = [
+            "#ff4d4f",
+            "#40a9ff",
+            "#73d13d",
+            "#faad14",
+            "#9254de",
+            "#13c2c2",
+            "#eb2f96",
+            "#a0d911",
+        ]
 
         # UI
         self.canvas = Canvas(self.root, width=960, height=540, bg="black")
@@ -94,6 +106,12 @@ class ROIToolApp:
         self.root.grid_rowconfigure(3, weight=1)
         for c in range(4):
             self.root.grid_columnconfigure(c, weight=1)
+
+        # Graph area (analysis result)
+        Label(self.root, text="解析結果グラフ").grid(row=6, column=0, sticky="w", padx=6)
+        self.graph_canvas = Canvas(self.root, width=960, height=240, bg="white")
+        self.graph_canvas.grid(row=7, column=0, columnspan=4, padx=6, pady=6, sticky="ew")
+        self.graph_canvas.bind("<Button-1>", self.on_graph_click)
 
     def run(self):
         self.root.mainloop()
@@ -296,10 +314,246 @@ class ROIToolApp:
 
     def _analyze_thread(self, path: str, rois: List[ROI], stride: int, out_csv: str):
         try:
-            analyze(path, rois, stride=stride, output_csv=out_csv, show_progress=True)
-            self.root.after(0, lambda: messagebox.showinfo("完了", f"CSVを書き出しました\n{out_csv}"))
+            df = analyze(path, rois, stride=stride, output_csv=out_csv, show_progress=True)
+            def on_done():
+                self.analysis_df = df
+                self.render_graph()
+                messagebox.showinfo("完了", f"CSVを書き出し、グラフを表示しました\n{out_csv}\nグラフをクリックすると該当位置から再生します")
+            self.root.after(0, on_done)
         except Exception as e:
             logger.exception(e)
             self.root.after(0, lambda: messagebox.showerror("Error", f"解析中にエラー: {e}"))
         finally:
             self.root.after(0, lambda: (self.btn_analyze.config(state="normal"), self.btn_open.config(state="normal")))
+
+    # -------------- graph rendering --------------
+    def render_graph(self):
+        c = self.graph_canvas
+        c.delete("all")
+        df = self.analysis_df
+        if df is None or len(df) == 0:
+            c.create_text(10, 10, anchor="nw", text="解析結果なし", fill="#888")
+            self.graph_axis = None
+            return
+        try:
+            import pandas as pd  # noqa: F401
+        except Exception:
+            pass
+
+        # Layout
+        w = int(c["width"])  # type: ignore
+        h = int(c["height"])  # type: ignore
+        margin_l, margin_r, margin_t, margin_b = 50, 10, 10, 30
+        gx0, gy0 = margin_l, margin_t
+        gw, gh = max(10, w - margin_l - margin_r), max(10, h - margin_t - margin_b)
+
+        # Axes
+        c.create_rectangle(gx0, gy0, gx0 + gw, gy0 + gh, outline="#ddd", fill="#fafafa")
+
+        # Determine columns (series)
+        cols = [col for col in df.columns if col not in ("frame_index", "timestamp_sec")]
+        if not cols:
+            c.create_text(10, 10, anchor="nw", text="系列がありません", fill="#888")
+            self.graph_axis = None
+            return
+
+        # X range: frame_index
+        try:
+            x_values = df["frame_index"].values.tolist()
+            x_min = min(x_values)
+            x_max = max(x_values)
+        except Exception:
+            x_values = list(range(len(df)))
+            x_min = 0
+            x_max = max(1, len(df) - 1)
+
+        # Y range: 0..1
+        y_min, y_max = 0.0, 1.0
+
+        def x_to_px(xv: float) -> float:
+            if x_max == x_min:
+                return gx0
+            return gx0 + (xv - x_min) / (x_max - x_min) * gw
+
+        def y_to_px(yv: float) -> float:
+            # invert y
+            return gy0 + gh - (yv - y_min) / (y_max - y_min) * gh
+
+        # Grid lines and ticks
+        for i in range(0, 6):
+            yy = gy0 + gh * i / 5
+            val = 1 - i / 5
+            c.create_line(gx0, yy, gx0 + gw, yy, fill="#eee")
+            c.create_text(gx0 - 8, yy, text=f"{val:.1f}", anchor="e", fill="#999")
+
+        # Legends
+        legend_x, legend_y = gx0 + 8, gy0 + 8
+        for idx, name in enumerate(cols):
+            color = self.series_colors[idx % len(self.series_colors)]
+            c.create_rectangle(legend_x, legend_y + idx * 16, legend_x + 12, legend_y + 12 + idx * 16, fill=color, outline=color)
+            c.create_text(legend_x + 16, legend_y + 6 + idx * 16, text=name, anchor="w", fill="#555")
+
+        # Draw series lines (may decimate if too many points)
+        max_points = 4000
+        n = len(df)
+        step = max(1, n // max_points)
+        for idx, name in enumerate(cols):
+            color = self.series_colors[idx % len(self.series_colors)]
+            pts = []
+            for i in range(0, n, step):
+                xv = x_values[i]
+                try:
+                    yv = float(df.iloc[i][name])
+                except Exception:
+                    continue
+                px = x_to_px(xv)
+                py = y_to_px(max(0.0, min(1.0, yv)))
+                pts.extend([px, py])
+            if len(pts) >= 4:
+                c.create_line(*pts, fill=color, width=2)
+
+        # X labels: show min/mid/max frame index
+        for xv in (x_min, (x_min + x_max) / 2, x_max):
+            xx = x_to_px(xv)
+            c.create_line(xx, gy0 + gh, xx, gy0 + gh + 5, fill="#ccc")
+            c.create_text(xx, gy0 + gh + 8, text=f"{int(round(xv))}", anchor="n", fill="#999")
+
+        # Save axis for click mapping
+        self.graph_axis = (gx0, gy0, gw, gh, x_min, x_max)
+
+    def on_graph_click(self, event):
+        if not self.video_path or self.analysis_df is None or self.graph_axis is None:
+            return
+        gx0, gy0, gw, gh, x_min, x_max = self.graph_axis
+        x = event.x
+        x = max(gx0, min(gx0 + gw, x))
+        ratio = 0.0 if gw == 0 else (x - gx0) / gw
+        frame_idx = int(round(x_min + ratio * (x_max - x_min)))
+        # open player window at this frame
+        self.open_player(frame_idx)
+
+    # -------------- simple video player --------------
+    def open_player(self, start_frame: int = 0):
+        if not self.video_path:
+            return
+        PlayerWindow(self.root, self.video_path, start_frame=start_frame)
+
+
+class PlayerWindow:
+    def __init__(self, master, video_path: str, start_frame: int = 0) -> None:
+        from tkinter import Toplevel, Scale, HORIZONTAL
+
+        self.top = Toplevel(master)
+        self.top.title("プレビュー再生")
+        self.video_path = video_path
+        self.cap = cv2.VideoCapture(video_path)
+        if not self.cap.isOpened():
+            messagebox.showerror("Error", "動画を開けませんでした")
+            self.top.destroy()
+            return
+        meta = probe(video_path)
+        self.fps = meta.fps if meta and meta.fps else float(self.cap.get(cv2.CAP_PROP_FPS)) or 30.0
+        self.n_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)) or (meta.n_frames if meta and meta.n_frames else 0)
+        self.playing = False
+        self.current_frame = max(0, min(start_frame, max(0, self.n_frames - 1)))
+        self.photo = None
+
+        # UI widgets
+        self.canvas = Canvas(self.top, width=640, height=360, bg="black")
+        self.canvas.grid(row=0, column=0, columnspan=4, padx=6, pady=6)
+
+        self.scale = Scale(self.top, from_=0, to=max(0, self.n_frames - 1), orient=HORIZONTAL, length=640, command=self.on_seek)
+        self.scale.grid(row=1, column=0, columnspan=4, padx=6, sticky="ew")
+
+        self.btn_play = Button(self.top, text="再生", command=self.toggle_play)
+        self.btn_play.grid(row=2, column=0, sticky="ew", padx=4, pady=4)
+        Button(self.top, text="<< -30f", command=lambda: self.jump(-30)).grid(row=2, column=1, sticky="ew", padx=4, pady=4)
+        Button(self.top, text="-1f", command=lambda: self.jump(-1)).grid(row=2, column=2, sticky="ew", padx=4, pady=4)
+        Button(self.top, text="+1f", command=lambda: self.jump(1)).grid(row=2, column=3, sticky="ew", padx=4, pady=4)
+
+        self.top.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # initial frame
+        self.seek_to(self.current_frame)
+        self.render_current_frame()
+
+    def on_close(self):
+        self.playing = False
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+        self.top.destroy()
+
+    def on_seek(self, value):
+        try:
+            idx = int(float(value))
+        except Exception:
+            return
+        self.current_frame = max(0, min(idx, max(0, self.n_frames - 1)))
+        self.seek_to(self.current_frame)
+        self.render_current_frame()
+
+    def seek_to(self, frame_idx: int):
+        try:
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        except Exception:
+            pass
+
+    def jump(self, delta: int):
+        self.current_frame = max(0, min(self.current_frame + delta, max(0, self.n_frames - 1)))
+        self.scale.set(self.current_frame)
+        self.seek_to(self.current_frame)
+        self.render_current_frame()
+
+    def toggle_play(self):
+        self.playing = not self.playing
+        self.btn_play.config(text="停止" if self.playing else "再生")
+        if self.playing:
+            self.play_loop()
+
+    def play_loop(self):
+        if not self.playing:
+            return
+        ok, frame = self.cap.read()
+        if not ok:
+            self.playing = False
+            self.btn_play.config(text="再生")
+            return
+        self.current_frame += 1
+        self.scale.set(self.current_frame)
+        self.render_frame(frame)
+        delay = int(1000 / max(1, int(round(self.fps))))
+        self.top.after(delay, self.play_loop)
+
+    def render_current_frame(self):
+        ok, frame = self.cap.read()
+        if not ok:
+            return
+        self.render_frame(frame)
+
+    def render_frame(self, frame):
+        # fit into canvas while preserving aspect
+        ch = int(self.canvas["height"])  # type: ignore
+        cw = int(self.canvas["width"])  # type: ignore
+        h, w = frame.shape[:2]
+        scale = min(cw / w, ch / h)
+        new_w, new_h = int(w * scale), int(h * scale)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        resized = cv2.resize(rgb, (new_w, new_h))
+        ox = (cw - new_w) // 2
+        oy = (ch - new_h) // 2
+        try:
+            from PIL import Image, ImageTk  # type: ignore
+            pil = Image.fromarray(resized)
+            self.photo = ImageTk.PhotoImage(pil)
+        except Exception:
+            import io
+            from tkinter import PhotoImage
+            success, buf = cv2.imencode(".ppm", cv2.cvtColor(resized, cv2.COLOR_RGB2BGR))
+            if not success:
+                return
+            data = io.BytesIO(buf.tobytes()).getvalue()
+            self.photo = PhotoImage(data=data)
+        self.canvas.delete("all")
+        self.canvas.create_image(ox, oy, anchor="nw", image=self.photo)
