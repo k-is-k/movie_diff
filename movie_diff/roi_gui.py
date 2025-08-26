@@ -498,11 +498,20 @@ class ROIToolApp:
     def on_graph_click(self, event):
         if not self.video_path or self.analysis_df is None or self.graph_axis is None:
             return
+        # Snap click to the nearest analyzed (sampled) frame to avoid
+        # apparent N× misalignment when stride > 1.
         gx0, gy0, gw, gh, x_min, x_max = self.graph_axis
-        x = event.x
-        x = max(gx0, min(gx0 + gw, x))
+        df = self.analysis_df
+        if df is None or len(df) == 0:
+            return
+        x = max(gx0, min(gx0 + gw, event.x))
         ratio = 0.0 if gw == 0 else (x - gx0) / gw
-        frame_idx = int(round(x_min + ratio * (x_max - x_min)))
+        row_idx = int(round(ratio * (len(df) - 1)))
+        try:
+            frame_idx = int(df.iloc[row_idx]["frame_index"])  # exact sampled frame
+        except Exception:
+            # Fallback to linear mapping over frame range
+            frame_idx = int(round(x_min + ratio * (x_max - x_min)))
         # open player window at this frame
         self.open_player(frame_idx)
 
