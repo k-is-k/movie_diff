@@ -60,6 +60,8 @@ class ROIToolApp:
             "#eb2f96",
             "#a0d911",
         ]
+        self.player_window = None  # type: ignore
+        self._graph_prev_xview = None
 
         # UI
         self.canvas = Canvas(self.root, width=960, height=540, bg="black")
@@ -122,6 +124,11 @@ class ROIToolApp:
         self.chk_split.grid(row=6, column=1, sticky="w")
         self.graph_canvas = Canvas(self.root, width=960, height=240, bg="white")
         self.graph_canvas.grid(row=7, column=0, columnspan=4, padx=6, pady=6, sticky="ew")
+        # horizontal scrollbar for long videos
+        from tkinter import Scrollbar
+        self.graph_scroll = Scrollbar(self.root, orient="horizontal", command=self.graph_canvas.xview)
+        self.graph_canvas.configure(xscrollcommand=self.graph_scroll.set)
+        self.graph_scroll.grid(row=8, column=0, columnspan=4, padx=6, pady=(0, 6), sticky="ew")
         self.graph_canvas.bind("<Button-1>", self.on_graph_click)
 
     def run(self):
@@ -356,7 +363,7 @@ class ROIToolApp:
         h = int(c["height"])  # type: ignore
         margin_l, margin_r, margin_t, margin_b = 50, 10, 10, 30
         gx0, gy0 = margin_l, margin_t
-        gw, gh_total = max(10, w - margin_l - margin_r), max(10, h - margin_t - margin_b)
+        gw_view, gh_total = max(10, w - margin_l - margin_r), max(10, h - margin_t - margin_b)
 
         # Determine columns (series)
         cols = [col for col in df.columns if col not in ("frame_index", "timestamp_sec")]
@@ -375,10 +382,15 @@ class ROIToolApp:
             x_min = 0
             x_max = max(1, len(df) - 1)
 
+        # Determine world width and x-scale: ensure at least 1px per frame for scrolling
+        x_span = max(1, int(x_max - x_min))
+        scale_x = max(gw_view / x_span, 1.0)
+        gw_world = x_span * scale_x
+
         def x_to_px(xv: float) -> float:
             if x_max == x_min:
                 return gx0
-            return gx0 + (xv - x_min) / (x_max - x_min) * gw
+            return gx0 + (xv - x_min) * scale_x
 
         # Draw either shared-scale or per-ROI panels
         split = bool(self.var_split_scale.get()) if hasattr(self, "var_split_scale") else False
@@ -393,13 +405,13 @@ class ROIToolApp:
                 return gy0 + gh_total - (yv - y_min) / (y_max - y_min) * gh_total
 
             # Background
-            c.create_rectangle(gx0, gy0, gx0 + gw, gy0 + gh_total, outline="#ddd", fill="#fafafa")
+            c.create_rectangle(gx0, gy0, gx0 + gw_world, gy0 + gh_total, outline="#ddd", fill="#fafafa")
 
             # Grid lines and ticks
             for i in range(0, 6):
                 yy = gy0 + gh_total * i / 5
                 val = 1 - i / 5
-                c.create_line(gx0, yy, gx0 + gw, yy, fill="#eee")
+                c.create_line(gx0, yy, gx0 + gw_world, yy, fill="#eee")
                 c.create_text(gx0 - 8, yy, text=f"{val:.1f}", anchor="e", fill="#999")
 
             # Legend
@@ -431,7 +443,7 @@ class ROIToolApp:
                 c.create_line(xx, gy0 + gh_total, xx, gy0 + gh_total + 5, fill="#ccc")
                 c.create_text(xx, gy0 + gh_total + 8, text=f"{int(round(xv))}", anchor="n", fill="#999")
 
-            self.graph_axis = (gx0, gy0, gw, gh_total, x_min, x_max)
+            self.graph_axis = (gx0, gy0, gw_world, gh_total, x_min, x_max)
         else:
             # Per-ROI panels with individual y-scales
             num = max(1, len(cols))
@@ -461,12 +473,12 @@ class ROIToolApp:
                     return base_y + panel_h - (yv - ymin) / (ymax - ymin) * panel_h
 
                 # Panel background
-                c.create_rectangle(gx0, py0, gx0 + gw, py0 + panel_h, outline="#ddd", fill="#fafafa")
+                c.create_rectangle(gx0, py0, gx0 + gw_world, py0 + panel_h, outline="#ddd", fill="#fafafa")
 
                 # Grid and ticks (min/mid/max)
                 for j, val in enumerate([s_max, (s_min + s_max) / 2, s_min]):
                     yy = y_to_px_local(val)
-                    c.create_line(gx0, yy, gx0 + gw, yy, fill="#eee")
+                    c.create_line(gx0, yy, gx0 + gw_world, yy, fill="#eee")
                     c.create_text(gx0 - 8, yy, text=f"{val:.3f}", anchor="e", fill="#999")
 
                 # Series label with color swatch
@@ -493,7 +505,23 @@ class ROIToolApp:
                 c.create_line(xx, gy0 + gh_total, xx, gy0 + gh_total + 5, fill="#ccc")
                 c.create_text(xx, gy0 + gh_total + 8, text=f"{int(round(xv))}", anchor="n", fill="#999")
 
-            self.graph_axis = (gx0, gy0, gw, gh_total, x_min, x_max)
+            self.graph_axis = (gx0, gy0, gw_world, gh_total, x_min, x_max)
+
+        # Configure scrollregion to enable horizontal scrolling across world width
+        total_w = margin_l + gw_world + margin_r
+        total_h = h
+        c.configure(scrollregion=(0, 0, total_w, total_h))
+        # restore previous xview if available
+        if self._graph_prev_xview is not None:
+            try:
+                c.xview_moveto(self._graph_prev_xview[0])
+            except Exception:
+                pass
+        # store current xview
+        try:
+            self._graph_prev_xview = c.xview()
+        except Exception:
+            self._graph_prev_xview = None
 
     def on_graph_click(self, event):
         if not self.video_path or self.analysis_df is None or self.graph_axis is None:
@@ -504,7 +532,9 @@ class ROIToolApp:
         df = self.analysis_df
         if df is None or len(df) == 0:
             return
-        x = max(gx0, min(gx0 + gw, event.x))
+        # translate event.x (viewport coords) to canvas/world coords for correct mapping when scrolled
+        xw = self.graph_canvas.canvasx(event.x)
+        x = max(gx0, min(gx0 + gw, xw))
         ratio = 0.0 if gw == 0 else (x - gx0) / gw
         row_idx = int(round(ratio * (len(df) - 1)))
         try:
@@ -519,7 +549,15 @@ class ROIToolApp:
     def open_player(self, start_frame: int = 0):
         if not self.video_path:
             return
-        PlayerWindow(self.root, self.video_path, start_frame=start_frame)
+        # reuse existing player if open to avoid heavy re-open
+        pw = getattr(self, "player_window", None)
+        if pw and getattr(pw, "alive", False):
+            try:
+                pw.jump_to(start_frame)
+                return
+            except Exception:
+                pass
+        self.player_window = PlayerWindow(self.root, self.video_path, start_frame=start_frame)
 
 
 class PlayerWindow:
@@ -534,6 +572,7 @@ class PlayerWindow:
             messagebox.showerror("Error", "動画を開けませんでした")
             self.top.destroy()
             return
+        self.alive = True
         meta = probe(video_path)
         self.fps = meta.fps if meta and meta.fps else float(self.cap.get(cv2.CAP_PROP_FPS)) or 30.0
         self.n_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)) or (meta.n_frames if meta and meta.n_frames else 0)
@@ -566,6 +605,7 @@ class PlayerWindow:
             self.cap.release()
         except Exception:
             pass
+        self.alive = False
         self.top.destroy()
 
     def on_seek(self, value):
@@ -585,6 +625,18 @@ class PlayerWindow:
 
     def jump(self, delta: int):
         self.current_frame = max(0, min(self.current_frame + delta, max(0, self.n_frames - 1)))
+        self.scale.set(self.current_frame)
+        self.seek_to(self.current_frame)
+        self.render_current_frame()
+
+    def jump_to(self, frame_idx: int):
+        # external control to jump directly to a frame (used from graph)
+        self.playing = False
+        try:
+            self.btn_play.config(text="再生")
+        except Exception:
+            pass
+        self.current_frame = max(0, min(int(frame_idx), max(0, self.n_frames - 1)))
         self.scale.set(self.current_frame)
         self.seek_to(self.current_frame)
         self.render_current_frame()
