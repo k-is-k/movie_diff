@@ -20,6 +20,8 @@ from tkinter import (
     Entry,
     Listbox,
     SINGLE,
+    Checkbutton,
+    BooleanVar,
 )
 
 from .models import ROI, ROISet
@@ -109,6 +111,15 @@ class ROIToolApp:
 
         # Graph area (analysis result)
         Label(self.root, text="解析結果グラフ").grid(row=6, column=0, sticky="w", padx=6)
+        # Toggle: per-ROI scaling
+        self.var_split_scale = BooleanVar(value=True)
+        self.chk_split = Checkbutton(
+            self.root,
+            text="ROIごとスケール",
+            variable=self.var_split_scale,
+            command=self.render_graph,
+        )
+        self.chk_split.grid(row=6, column=1, sticky="w")
         self.graph_canvas = Canvas(self.root, width=960, height=240, bg="white")
         self.graph_canvas.grid(row=7, column=0, columnspan=4, padx=6, pady=6, sticky="ew")
         self.graph_canvas.bind("<Button-1>", self.on_graph_click)
@@ -345,10 +356,7 @@ class ROIToolApp:
         h = int(c["height"])  # type: ignore
         margin_l, margin_r, margin_t, margin_b = 50, 10, 10, 30
         gx0, gy0 = margin_l, margin_t
-        gw, gh = max(10, w - margin_l - margin_r), max(10, h - margin_t - margin_b)
-
-        # Axes
-        c.create_rectangle(gx0, gy0, gx0 + gw, gy0 + gh, outline="#ddd", fill="#fafafa")
+        gw, gh_total = max(10, w - margin_l - margin_r), max(10, h - margin_t - margin_b)
 
         # Determine columns (series)
         cols = [col for col in df.columns if col not in ("frame_index", "timestamp_sec")]
@@ -367,59 +375,125 @@ class ROIToolApp:
             x_min = 0
             x_max = max(1, len(df) - 1)
 
-        # Y range: 0..1
-        y_min, y_max = 0.0, 1.0
-
         def x_to_px(xv: float) -> float:
             if x_max == x_min:
                 return gx0
             return gx0 + (xv - x_min) / (x_max - x_min) * gw
 
-        def y_to_px(yv: float) -> float:
-            # invert y
-            return gy0 + gh - (yv - y_min) / (y_max - y_min) * gh
-
-        # Grid lines and ticks
-        for i in range(0, 6):
-            yy = gy0 + gh * i / 5
-            val = 1 - i / 5
-            c.create_line(gx0, yy, gx0 + gw, yy, fill="#eee")
-            c.create_text(gx0 - 8, yy, text=f"{val:.1f}", anchor="e", fill="#999")
-
-        # Legends
-        legend_x, legend_y = gx0 + 8, gy0 + 8
-        for idx, name in enumerate(cols):
-            color = self.series_colors[idx % len(self.series_colors)]
-            c.create_rectangle(legend_x, legend_y + idx * 16, legend_x + 12, legend_y + 12 + idx * 16, fill=color, outline=color)
-            c.create_text(legend_x + 16, legend_y + 6 + idx * 16, text=name, anchor="w", fill="#555")
-
-        # Draw series lines (may decimate if too many points)
+        # Draw either shared-scale or per-ROI panels
+        split = bool(self.var_split_scale.get()) if hasattr(self, "var_split_scale") else False
         max_points = 4000
         n = len(df)
         step = max(1, n // max_points)
-        for idx, name in enumerate(cols):
-            color = self.series_colors[idx % len(self.series_colors)]
-            pts = []
-            for i in range(0, n, step):
-                xv = x_values[i]
-                try:
-                    yv = float(df.iloc[i][name])
-                except Exception:
-                    continue
-                px = x_to_px(xv)
-                py = y_to_px(max(0.0, min(1.0, yv)))
-                pts.extend([px, py])
-            if len(pts) >= 4:
-                c.create_line(*pts, fill=color, width=2)
 
-        # X labels: show min/mid/max frame index
-        for xv in (x_min, (x_min + x_max) / 2, x_max):
-            xx = x_to_px(xv)
-            c.create_line(xx, gy0 + gh, xx, gy0 + gh + 5, fill="#ccc")
-            c.create_text(xx, gy0 + gh + 8, text=f"{int(round(xv))}", anchor="n", fill="#999")
+        if not split:
+            # Shared scale: 0..1
+            y_min, y_max = 0.0, 1.0
+            def y_to_px(yv: float) -> float:
+                return gy0 + gh_total - (yv - y_min) / (y_max - y_min) * gh_total
 
-        # Save axis for click mapping
-        self.graph_axis = (gx0, gy0, gw, gh, x_min, x_max)
+            # Background
+            c.create_rectangle(gx0, gy0, gx0 + gw, gy0 + gh_total, outline="#ddd", fill="#fafafa")
+
+            # Grid lines and ticks
+            for i in range(0, 6):
+                yy = gy0 + gh_total * i / 5
+                val = 1 - i / 5
+                c.create_line(gx0, yy, gx0 + gw, yy, fill="#eee")
+                c.create_text(gx0 - 8, yy, text=f"{val:.1f}", anchor="e", fill="#999")
+
+            # Legend
+            legend_x, legend_y = gx0 + 8, gy0 + 8
+            for idx, name in enumerate(cols):
+                color = self.series_colors[idx % len(self.series_colors)]
+                c.create_rectangle(legend_x, legend_y + idx * 16, legend_x + 12, legend_y + 12 + idx * 16, fill=color, outline=color)
+                c.create_text(legend_x + 16, legend_y + 6 + idx * 16, text=name, anchor="w", fill="#555")
+
+            # Draw all series
+            for idx, name in enumerate(cols):
+                color = self.series_colors[idx % len(self.series_colors)]
+                pts = []
+                for i in range(0, n, step):
+                    xv = x_values[i]
+                    try:
+                        yv = float(df.iloc[i][name])
+                    except Exception:
+                        continue
+                    px = x_to_px(xv)
+                    py = y_to_px(max(0.0, min(1.0, yv)))
+                    pts.extend([px, py])
+                if len(pts) >= 4:
+                    c.create_line(*pts, fill=color, width=2)
+
+            # X labels
+            for xv in (x_min, (x_min + x_max) / 2, x_max):
+                xx = x_to_px(xv)
+                c.create_line(xx, gy0 + gh_total, xx, gy0 + gh_total + 5, fill="#ccc")
+                c.create_text(xx, gy0 + gh_total + 8, text=f"{int(round(xv))}", anchor="n", fill="#999")
+
+            self.graph_axis = (gx0, gy0, gw, gh_total, x_min, x_max)
+        else:
+            # Per-ROI panels with individual y-scales
+            num = max(1, len(cols))
+            vgap = 8
+            panel_h = max(10, int((gh_total - vgap * (num - 1)) / num))
+            for idx, name in enumerate(cols):
+                color = self.series_colors[idx % len(self.series_colors)]
+                py0 = gy0 + idx * (panel_h + vgap)
+                # Compute y-range for this series
+                series_vals = []
+                for i in range(0, n, step):
+                    try:
+                        series_vals.append(float(df.iloc[i][name]))
+                    except Exception:
+                        continue
+                if series_vals:
+                    s_min = min(series_vals)
+                    s_max = max(series_vals)
+                else:
+                    s_min, s_max = 0.0, 1.0
+                if abs(s_max - s_min) < 1e-6:
+                    pad = 0.05 if s_max == 0 else s_max * 0.05
+                    s_min -= pad
+                    s_max += pad
+
+                def y_to_px_local(yv: float, ymin=s_min, ymax=s_max, base_y=py0):
+                    return base_y + panel_h - (yv - ymin) / (ymax - ymin) * panel_h
+
+                # Panel background
+                c.create_rectangle(gx0, py0, gx0 + gw, py0 + panel_h, outline="#ddd", fill="#fafafa")
+
+                # Grid and ticks (min/mid/max)
+                for j, val in enumerate([s_max, (s_min + s_max) / 2, s_min]):
+                    yy = y_to_px_local(val)
+                    c.create_line(gx0, yy, gx0 + gw, yy, fill="#eee")
+                    c.create_text(gx0 - 8, yy, text=f"{val:.3f}", anchor="e", fill="#999")
+
+                # Series label with color swatch
+                c.create_rectangle(gx0 + 8, py0 + 6, gx0 + 20, py0 + 18, fill=color, outline=color)
+                c.create_text(gx0 + 24, py0 + 12, text=name, anchor="w", fill="#555")
+
+                # Draw the line for this series
+                pts = []
+                for i in range(0, n, step):
+                    xv = x_values[i]
+                    try:
+                        yv = float(df.iloc[i][name])
+                    except Exception:
+                        continue
+                    px = x_to_px(xv)
+                    py = y_to_px_local(yv)
+                    pts.extend([px, py])
+                if len(pts) >= 4:
+                    c.create_line(*pts, fill=color, width=2)
+
+            # X labels at bottom only
+            for xv in (x_min, (x_min + x_max) / 2, x_max):
+                xx = x_to_px(xv)
+                c.create_line(xx, gy0 + gh_total, xx, gy0 + gh_total + 5, fill="#ccc")
+                c.create_text(xx, gy0 + gh_total + 8, text=f"{int(round(xv))}", anchor="n", fill="#999")
+
+            self.graph_axis = (gx0, gy0, gw, gh_total, x_min, x_max)
 
     def on_graph_click(self, event):
         if not self.video_path or self.analysis_df is None or self.graph_axis is None:
