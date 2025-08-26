@@ -33,17 +33,18 @@ def analyze(
     if meta is None:
         logger.warning("Failed to probe metadata; proceeding with OpenCV defaults")
         fps = 0.0
-        n_frames = None
     else:
         fps = meta.fps or 0.0
-        n_frames = meta.n_frames
 
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
         raise RuntimeError(f"Failed to open video: {input_path}")
 
     pbar = None
-    total = (n_frames // stride) if (n_frames and stride > 0) else None
+    # Use decoder-reported frame count for progress, which better matches
+    # actual readable frames on this machine than ffprobe's nb_frames.
+    cap_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    total = (cap_frame_count // stride) if (cap_frame_count > 0 and stride > 0) else None
     if show_progress:
         pbar = tqdm(total=total, desc="Analyzing", unit="f")
 

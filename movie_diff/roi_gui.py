@@ -129,7 +129,7 @@ class ROIToolApp:
 
     # -------------- file ops --------------
     def open_video(self):
-        path = filedialog.askopenfilename(title="動画を選択", filetypes=[("Video", "*.mp4;*.mov;*.avi;*.mkv;*.m4v;*.webm"), ("All", "*.*")])
+        path = filedialog.askopenfilename(title="動画を選択", filetypes=[("Video", "*.mp4;*.mov;*.avi;*.mkv;*.m4v;*.webm;*.MTS"), ("All", "*.*")])
         if not path:
             return
         try:

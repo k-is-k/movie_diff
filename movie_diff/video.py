@@ -44,7 +44,8 @@ def probe_with_ffprobe(path: str) -> Optional[VideoMeta]:
         s0 = streams[0]
         width = int(s0.get("width"))
         height = int(s0.get("height"))
-        r = s0.get("r_frame_rate") or s0.get("avg_frame_rate") or "0/1"
+        # Prefer avg_frame_rate over r_frame_rate to avoid doubled fps on some files
+        r = s0.get("avg_frame_rate") or s0.get("r_frame_rate") or "0/1"
         num, den = r.split("/")
         fps = float(num) / float(den) if float(den) != 0 else 0.0
         nb_frames = s0.get("nb_frames")
@@ -84,4 +85,3 @@ def read_first_frame(path: str):
     if not ok:
         raise RuntimeError("Failed to read first frame")
     return frame
-
